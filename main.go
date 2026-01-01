@@ -3,11 +3,15 @@ package main
 import (
 	"log"
 
+	"image/color"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -40,13 +44,17 @@ func main() {
 	myWindow.ShowAndRun()
 }
 
-// --- Screen 1: Registration ---
+// --- Screen 1: Registration (First Run) ---
 func showRegistrationScreen(w fyne.Window) {
 	passEntry := widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("Create Master Password")
+
 	confirmEntry := widget.NewPasswordEntry()
 	confirmEntry.SetPlaceHolder("Confirm Password")
+
 	errorLabel := widget.NewLabel("")
+	errorLabel.Alignment = fyne.TextAlignCenter         // Center error text
+	errorLabel.TextStyle = fyne.TextStyle{Italic: true} // Make it look like a status message
 
 	registerBtn := widget.NewButton("Create Account", func() {
 		if passEntry.Text == "" {
@@ -62,26 +70,59 @@ func showRegistrationScreen(w fyne.Window) {
 			return
 		}
 		sessionPassword = passEntry.Text
-		// Initialize Drive after registration
 		initDriveAndShowApp(w)
 	})
+	registerBtn.Importance = widget.HighImportance // Makes the button visually prominent (usually blue)
 
-	content := container.NewCenter(
-		container.NewVBox(
-			widget.NewLabelWithStyle("Setup Secure Notes", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-			passEntry, confirmEntry, registerBtn, errorLabel,
-		),
+	// --- CLEANER SPACER LOGIC ---
+	// Create an invisible object that is 300 units wide and 0 units high.
+	// This forces the parent container to be at least 300 units wide.
+	spacer := canvas.NewRectangle(color.Transparent)
+	spacer.SetMinSize(fyne.NewSize(300, 0))
+
+	// --- Layout Construction ---
+	// We use a VBox for vertical stacking, but with added spacing items
+	formContent := container.NewVBox(
+		// Title
+		widget.NewLabelWithStyle("Setup Secure Notes", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+
+		// Spacing
+		widget.NewLabel(""),
+
+		// Inputs
+		passEntry,
+		confirmEntry,
+
+		// Spacing
+		widget.NewLabel(""),
+
+		// Action
+		registerBtn,
+
+		// Status
+		errorLabel,
+
+		// Invisible spacer to force width
+		container.NewHBox(layout.NewSpacer(), spacer, layout.NewSpacer()),
 	)
-	w.SetContent(content)
+
+	// Wrap in a Card for a nice background/border look
+	card := widget.NewCard("", "", container.NewPadded(formContent))
+
+	// Center the card on screen
+	w.SetContent(container.NewCenter(card))
 }
 
-// --- Screen 2: Login ---
+// --- Screen 2: Login (Subsequent Runs) ---
 func showLoginScreen(w fyne.Window) {
 	passEntry := widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("Enter Master Password")
-	errorLabel := widget.NewLabel("")
 
-	loginBtn := widget.NewButton("Unlock", func() {
+	errorLabel := widget.NewLabel("")
+	errorLabel.Alignment = fyne.TextAlignCenter
+	errorLabel.TextStyle = fyne.TextStyle{Italic: true}
+
+	loginBtn := widget.NewButton("Unlock Safe", func() {
 		if VerifyPassword(passEntry.Text) {
 			sessionPassword = passEntry.Text
 			initDriveAndShowApp(w)
@@ -90,14 +131,42 @@ func showLoginScreen(w fyne.Window) {
 			passEntry.SetText("")
 		}
 	})
+	loginBtn.Importance = widget.HighImportance
 
-	content := container.NewCenter(
-		container.NewVBox(
-			widget.NewLabelWithStyle("Welcome Back", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-			passEntry, loginBtn, errorLabel,
-		),
+	// --- CLEANER SPACER LOGIC ---
+	// Create an invisible object that is 300 units wide and 0 units high.
+	// This forces the parent container to be at least 300 units wide.
+	spacer := canvas.NewRectangle(color.Transparent)
+	spacer.SetMinSize(fyne.NewSize(300, 0))
+
+	// --- Layout Construction ---
+	formContent := container.NewVBox(
+		// Title
+		widget.NewLabelWithStyle("Welcome Back", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+
+		// Vertical Gap
+		widget.NewLabel(""),
+
+		// Input
+		passEntry,
+
+		// Vertical Gap
+		widget.NewLabel(""),
+
+		// Button
+		loginBtn,
+
+		// Error Message
+		errorLabel,
+
+		// Force width
+		container.NewCenter(spacer),
 	)
-	w.SetContent(content)
+
+	// Wrap in Padded Card
+	card := widget.NewCard("", "", container.NewPadded(formContent))
+
+	w.SetContent(container.NewCenter(card))
 }
 
 // Helper to init drive inside the GUI flow
@@ -122,12 +191,19 @@ func initDriveAndShowApp(w fyne.Window) {
 func showMainApp(w fyne.Window) {
 	ui := &UIComponents{}
 
-	// 1. Sidebar List
+	// --- 1. Sidebar List (With Padding) ---
 	ui.NoteList = widget.NewList(
 		func() int { return len(noteCache) },
-		func() fyne.CanvasObject { return widget.NewLabel("Template Note Title") },
+		func() fyne.CanvasObject {
+			// We wrap the text in a Padded container so list items breathe
+			label := widget.NewLabel("Template Note Title")
+			label.TextStyle = fyne.TextStyle{Bold: true}
+			return container.NewPadded(label)
+		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
-			o.(*widget.Label).SetText(noteCache[i].Name)
+			// Because we wrapped it in Padded, we must unpack it to get the label
+			// Structure: Padded Container -> [0] Label
+			o.(*fyne.Container).Objects[0].(*widget.Label).SetText(noteCache[i].Name)
 		},
 	)
 
@@ -138,51 +214,64 @@ func showMainApp(w fyne.Window) {
 		ui.TitleEntry.SetText(selectedNote.Name)
 		ui.StatusLabel.SetText("Downloading...")
 
-		// Fetch and Decrypt in background
 		go func() {
-			// 1. Download
 			encryptedContent, err := DownloadNoteContent(selectedNote.ID)
 			if err != nil {
 				ui.StatusLabel.SetText("Download Error: " + err.Error())
 				return
 			}
-
-			// 2. Decrypt
 			plainText, err := Decrypt(sessionPassword, encryptedContent)
 			if err != nil {
-				// If decryption fails, it might be a plain text file or wrong password
 				ui.StatusLabel.SetText("Decryption Error: " + err.Error())
 				return
 			}
-
-			// 3. Update UI
 			ui.BodyEntry.SetText(plainText)
 			ui.StatusLabel.SetText("Loaded: " + selectedNote.Name)
 		}()
 	}
 
-	// 2. Editor Area
+	// --- 2. Top Bar (Topic + Buttons) ---
 	ui.TitleEntry = widget.NewEntry()
-	ui.TitleEntry.SetPlaceHolder("Note Topic / Title")
+	ui.TitleEntry.SetPlaceHolder("Enter Topic / Title")
 
-	ui.BodyEntry = widget.NewMultiLineEntry()
-	ui.BodyEntry.SetPlaceHolder("Write your secure notes here...")
-	ui.BodyEntry.Wrapping = fyne.TextWrapWord
-
-	ui.StatusLabel = widget.NewLabel("Ready. Connected to Google Drive.")
-
-	// 3. Buttons
-
-	// NEW NOTE BUTTON: Clears the state so we can save a fresh file
-	ui.NewBtn = widget.NewButton("New Note", func() {
-		currentNoteID = "" // Reset ID to empty -> triggers "Create" logic in Drive
+	ui.NewBtn = widget.NewButtonWithIcon("New", theme.FileIcon(), func() {
+		currentNoteID = ""
 		ui.TitleEntry.SetText("")
 		ui.BodyEntry.SetText("")
 		ui.StatusLabel.SetText("New note started.")
-		ui.NoteList.UnselectAll() // Visually deselect the list
+		ui.NoteList.UnselectAll()
 	})
 
-	ui.SaveBtn = widget.NewButton("Encrypt & Save Cloud", func() {
+	ui.RefreshBtn = widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
+		refreshNotes(ui)
+	})
+
+	// Layout Logic:
+	// We use a Border layout.
+	// Left: "Topic" Label
+	// Right: Buttons
+	// Center: TitleEntry (This makes it EXPAND to fill the gap!)
+	toolbarRight := container.NewHBox(ui.NewBtn, ui.RefreshBtn)
+	topBar := container.NewBorder(
+		nil, nil,
+		widget.NewLabel("Topic: "), // Left
+		toolbarRight,               // Right
+		ui.TitleEntry,              // Center (Expands)
+	)
+
+	// --- 3. Main Editor Area ---
+	ui.BodyEntry = widget.NewMultiLineEntry()
+	ui.BodyEntry.SetPlaceHolder("Write your secure notes here...")
+	ui.BodyEntry.Wrapping = fyne.TextWrapWord
+	// Add padding around the text box so it doesn't touch the window edges
+	bodyArea := container.NewPadded(ui.BodyEntry)
+
+	// --- 4. Bottom Bar (Status + Save) ---
+	ui.StatusLabel = widget.NewLabel("Ready. Connected to Google Drive.")
+	ui.StatusLabel.Alignment = fyne.TextAlignCenter
+	ui.StatusLabel.TextStyle = fyne.TextStyle{Italic: true}
+
+	ui.SaveBtn = widget.NewButtonWithIcon("Encrypt & Save Cloud", theme.DocumentSaveIcon(), func() {
 		title := ui.TitleEntry.Text
 		body := ui.BodyEntry.Text
 
@@ -192,8 +281,6 @@ func showMainApp(w fyne.Window) {
 		}
 
 		ui.StatusLabel.SetText("Encrypting...")
-
-		// Encrypt
 		encryptedData, err := Encrypt(sessionPassword, body)
 		if err != nil {
 			ui.StatusLabel.SetText("Encryption failed: " + err.Error())
@@ -201,38 +288,35 @@ func showMainApp(w fyne.Window) {
 		}
 
 		ui.StatusLabel.SetText("Uploading...")
-
-		// Upload to Drive (Background)
 		go func() {
 			newID, err := SaveNote(currentNoteID, title, encryptedData)
 			if err != nil {
 				ui.StatusLabel.SetText("Upload failed: " + err.Error())
 				return
 			}
-			currentNoteID = newID // Update ID if it was a new note
+			currentNoteID = newID
 			ui.StatusLabel.SetText("Saved successfully!")
-			refreshNotes(ui) // Refresh list to see new file
+			refreshNotes(ui)
 		}()
 	})
+	ui.SaveBtn.Importance = widget.HighImportance // Make button Blue (Primary)
 
-	ui.RefreshBtn = widget.NewButton("Refresh List", func() {
-		refreshNotes(ui)
-	})
+	bottomBar := container.NewVBox(ui.StatusLabel, ui.SaveBtn)
 
-	// Layout
-	topBar := container.NewHBox(widget.NewLabel("Topic:"), ui.TitleEntry, layout.NewSpacer(), ui.NewBtn, ui.RefreshBtn)
-
+	// --- 5. Assemble the Right Side ---
 	editorContent := container.NewBorder(
-		topBar,
-		container.NewVBox(ui.StatusLabel, ui.SaveBtn),
-		nil, nil, ui.BodyEntry,
+		container.NewPadded(topBar),    // Top (with padding)
+		container.NewPadded(bottomBar), // Bottom (with padding)
+		nil, nil,
+		bodyArea, // Center
 	)
 
+	// --- 6. Final Split ---
 	split := container.NewHSplit(
-		container.New(layout.NewMaxLayout(), ui.NoteList),
-		editorContent,
+		container.New(layout.NewMaxLayout(), ui.NoteList), // Sidebar
+		editorContent, // Main Content
 	)
-	split.SetOffset(0.3)
+	split.SetOffset(0.25) // Sidebar takes 25% of width
 
 	w.SetContent(split)
 
