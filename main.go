@@ -1,9 +1,10 @@
 package main
 
 import (
-	"log"
-
 	"image/color"
+	"log"
+	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -14,6 +15,21 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
+
+// NoteData is the structure we save inside the encrypted JSON
+type NoteData struct {
+	ID        string    `json:"id"` // Internal App ID (random string)
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// AppNote holds the data + the Google Drive File ID needed for updates
+type AppNote struct {
+	DriveID string
+	Data    NoteData
+}
 
 type UIComponents struct {
 	NoteList    *widget.List
@@ -27,13 +43,14 @@ type UIComponents struct {
 
 // Global state
 var sessionPassword string
-var currentNoteID string  // Keeps track if we are editing an existing note or creating a new one
-var noteCache []DriveNote // Stores the list of notes from Drive
+var currentDriveID string // The Google Drive ID of the currently selected note
+var currentAppID string   // The Internal App ID (filename)
+var noteCache []AppNote   // Stores the fully decrypted notes for the list
 
 func main() {
 	myApp := app.New()
-	myWindow := myApp.NewWindow("Secure Drive Notes")
-	myWindow.Resize(fyne.NewSize(900, 600))
+	myWindow := myApp.NewWindow("Secure Drive Notes (JSON Privacy)")
+	myWindow.Resize(fyne.NewSize(950, 650))
 
 	if IsFirstRun() {
 		showRegistrationScreen(myWindow)
@@ -188,54 +205,46 @@ func initDriveAndShowApp(w fyne.Window) {
 }
 
 // --- Screen 3: Main App ---
+
 func showMainApp(w fyne.Window) {
 	ui := &UIComponents{}
 
-	// --- 1. Sidebar List (With Padding) ---
+	// --- 1. Sidebar List ---
 	ui.NoteList = widget.NewList(
 		func() int { return len(noteCache) },
 		func() fyne.CanvasObject {
-			// We wrap the text in a Padded container so list items breathe
-			label := widget.NewLabel("Template Note Title")
+			label := widget.NewLabel("Template Note")
 			label.TextStyle = fyne.TextStyle{Bold: true}
 			return container.NewPadded(label)
 		},
 		func(i widget.ListItemID, o fyne.CanvasObject) {
-			// Because we wrapped it in Padded, we must unpack it to get the label
-			// Structure: Padded Container -> [0] Label
-			o.(*fyne.Container).Objects[0].(*widget.Label).SetText(noteCache[i].Name)
+			// Display the Title from the decrypted JSON
+			title := noteCache[i].Data.Title
+			if title == "" {
+				title = "Untitled Note"
+			}
+			o.(*fyne.Container).Objects[0].(*widget.Label).SetText(title)
 		},
 	)
 
-	// Handle Note Selection
 	ui.NoteList.OnSelected = func(id widget.ListItemID) {
-		selectedNote := noteCache[id]
-		currentNoteID = selectedNote.ID
-		ui.TitleEntry.SetText(selectedNote.Name)
-		ui.StatusLabel.SetText("Downloading...")
+		selected := noteCache[id]
+		currentDriveID = selected.DriveID
+		currentAppID = selected.Data.ID
 
-		go func() {
-			encryptedContent, err := DownloadNoteContent(selectedNote.ID)
-			if err != nil {
-				ui.StatusLabel.SetText("Download Error: " + err.Error())
-				return
-			}
-			plainText, err := Decrypt(sessionPassword, encryptedContent)
-			if err != nil {
-				ui.StatusLabel.SetText("Decryption Error: " + err.Error())
-				return
-			}
-			ui.BodyEntry.SetText(plainText)
-			ui.StatusLabel.SetText("Loaded: " + selectedNote.Name)
-		}()
+		// Populate UI directly from Cache (no need to download again!)
+		ui.TitleEntry.SetText(selected.Data.Title)
+		ui.BodyEntry.SetText(selected.Data.Body)
+		ui.StatusLabel.SetText("Loaded: " + selected.Data.ID)
 	}
 
-	// --- 2. Top Bar (Topic + Buttons) ---
+	// --- 2. Top Bar ---
 	ui.TitleEntry = widget.NewEntry()
 	ui.TitleEntry.SetPlaceHolder("Enter Topic / Title")
 
 	ui.NewBtn = widget.NewButtonWithIcon("New", theme.FileIcon(), func() {
-		currentNoteID = ""
+		currentDriveID = ""
+		currentAppID = ""
 		ui.TitleEntry.SetText("")
 		ui.BodyEntry.SetText("")
 		ui.StatusLabel.SetText("New note started.")
@@ -246,77 +255,66 @@ func showMainApp(w fyne.Window) {
 		refreshNotes(ui)
 	})
 
-	// Layout Logic:
-	// We use a Border layout.
-	// Left: "Topic" Label
-	// Right: Buttons
-	// Center: TitleEntry (This makes it EXPAND to fill the gap!)
 	toolbarRight := container.NewHBox(ui.NewBtn, ui.RefreshBtn)
-	topBar := container.NewBorder(
-		nil, nil,
-		widget.NewLabel("Topic: "), // Left
-		toolbarRight,               // Right
-		ui.TitleEntry,              // Center (Expands)
-	)
+	topBar := container.NewBorder(nil, nil, widget.NewLabel("Topic: "), toolbarRight, ui.TitleEntry)
 
-	// --- 3. Main Editor Area ---
+	// --- 3. Body ---
 	ui.BodyEntry = widget.NewMultiLineEntry()
 	ui.BodyEntry.SetPlaceHolder("Write your secure notes here...")
 	ui.BodyEntry.Wrapping = fyne.TextWrapWord
-	// Add padding around the text box so it doesn't touch the window edges
 	bodyArea := container.NewPadded(ui.BodyEntry)
 
-	// --- 4. Bottom Bar (Status + Save) ---
-	ui.StatusLabel = widget.NewLabel("Ready. Connected to Google Drive.")
+	// --- 4. Bottom Bar ---
+	ui.StatusLabel = widget.NewLabel("Ready.")
 	ui.StatusLabel.Alignment = fyne.TextAlignCenter
 	ui.StatusLabel.TextStyle = fyne.TextStyle{Italic: true}
 
-	ui.SaveBtn = widget.NewButtonWithIcon("Encrypt & Save Cloud", theme.DocumentSaveIcon(), func() {
+	ui.SaveBtn = widget.NewButtonWithIcon("Encrypt & Save JSON", theme.DocumentSaveIcon(), func() {
 		title := ui.TitleEntry.Text
 		body := ui.BodyEntry.Text
-
-		if title == "" || body == "" {
-			ui.StatusLabel.SetText("Error: Title and Body required")
+		if title == "" {
+			ui.StatusLabel.SetText("Title is required")
 			return
 		}
 
-		ui.StatusLabel.SetText("Encrypting...")
-		encryptedData, err := Encrypt(sessionPassword, body)
-		if err != nil {
-			ui.StatusLabel.SetText("Encryption failed: " + err.Error())
-			return
+		ui.StatusLabel.SetText("Packaging & Encrypting...")
+
+		// Generate ID if new
+		if currentAppID == "" {
+			currentAppID = GenerateRandomID()
 		}
 
-		ui.StatusLabel.SetText("Uploading...")
+		// Create Struct
+		note := NoteData{
+			ID:        currentAppID,
+			Title:     title,
+			Body:      body,
+			UpdatedAt: time.Now(),
+		}
+		if currentDriveID == "" {
+			note.CreatedAt = time.Now()
+		}
+
+		// Save (Encrypts the whole struct)
 		go func() {
-			newID, err := SaveNote(currentNoteID, title, encryptedData)
+			driveID, err := SaveJSONNote(currentDriveID, note, sessionPassword)
 			if err != nil {
-				ui.StatusLabel.SetText("Upload failed: " + err.Error())
+				ui.StatusLabel.SetText("Save failed: " + err.Error())
 				return
 			}
-			currentNoteID = newID
-			ui.StatusLabel.SetText("Saved successfully!")
+			currentDriveID = driveID
+			ui.StatusLabel.SetText("Saved securely as " + currentAppID + ".json")
 			refreshNotes(ui)
 		}()
 	})
-	ui.SaveBtn.Importance = widget.HighImportance // Make button Blue (Primary)
+	ui.SaveBtn.Importance = widget.HighImportance
 
 	bottomBar := container.NewVBox(ui.StatusLabel, ui.SaveBtn)
 
-	// --- 5. Assemble the Right Side ---
-	editorContent := container.NewBorder(
-		container.NewPadded(topBar),    // Top (with padding)
-		container.NewPadded(bottomBar), // Bottom (with padding)
-		nil, nil,
-		bodyArea, // Center
-	)
-
-	// --- 6. Final Split ---
-	split := container.NewHSplit(
-		container.New(layout.NewMaxLayout(), ui.NoteList), // Sidebar
-		editorContent, // Main Content
-	)
-	split.SetOffset(0.25) // Sidebar takes 25% of width
+	// --- Layout ---
+	editorContent := container.NewBorder(container.NewPadded(topBar), container.NewPadded(bottomBar), nil, nil, bodyArea)
+	split := container.NewHSplit(container.New(layout.NewMaxLayout(), ui.NoteList), editorContent)
+	split.SetOffset(0.25)
 
 	w.SetContent(split)
 
@@ -325,13 +323,43 @@ func showMainApp(w fyne.Window) {
 }
 
 func refreshNotes(ui *UIComponents) {
+	ui.StatusLabel.SetText("Syncing: Fetching file list...")
+
 	go func() {
-		notes, err := ListNotes()
+		// 1. List Files (Only gets IDs and Encrypted filenames)
+		files, err := ListDriveFiles()
 		if err != nil {
-			log.Println("Error listing notes:", err)
+			log.Println("List error:", err)
 			return
 		}
-		noteCache = notes
+
+		// 2. Download & Decrypt each file to build the cache
+		// In a real app, we would parallelize this or use a local DB cache.
+		var newCache []AppNote
+
+		ui.StatusLabel.SetText("Syncing: Decrypting notes...")
+
+		for _, f := range files {
+			// Skip if not json
+			if !strings.HasSuffix(f.Name, ".json") {
+				continue
+			}
+
+			noteData, err := FetchAndDecryptNote(f.DriveID, sessionPassword)
+			if err != nil {
+				log.Println("Failed to decrypt file:", f.Name, err)
+				continue
+			}
+
+			newCache = append(newCache, AppNote{
+				DriveID: f.DriveID,
+				Data:    *noteData,
+			})
+		}
+
+		// 3. Update UI
+		noteCache = newCache
 		ui.NoteList.Refresh()
+		ui.StatusLabel.SetText("Sync Complete.")
 	}()
 }

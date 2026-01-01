@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,13 +18,12 @@ import (
 	"google.golang.org/api/option"
 )
 
-// Global Drive Service
 var srv *drive.Service
+var appFolderID string
 
-// Retrieve a token, saves the token, then returns the generated client.
+// --- AUTH & SETUP (Same as before) ---
+
 func getClient(config *oauth2.Config) *http.Client {
-	// The file token.json stores the user's access and refresh tokens, and is
-	// created automatically when the authorization flow completes for the first time.
 	tokFile := "token.json"
 	tok, err := tokenFromFile(tokFile)
 	if err != nil {
@@ -32,16 +33,9 @@ func getClient(config *oauth2.Config) *http.Client {
 	return config.Client(context.Background(), tok)
 }
 
-// Request a token from the web, then returns the retrieved token.
 func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
 	fmt.Printf("Go to the following link in your browser then type the authorization code: \n%v\n", authURL)
-
-	// Since we are in a GUI app, let's try to open the browser automatically
-	// (This works on Mac/Windows/Linux usually)
-	// For now, we will print to console and ask user to paste back in terminal.
-	// NOTE: In a polished app, you would pop up a dialog input box here.
-	// For this MVP, look at your TERMINAL window for the link.
 
 	var authCode string
 	fmt.Print("Type the authorization code here: ")
@@ -56,7 +50,6 @@ func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
 	return tok
 }
 
-// Retrieves a token from a local file.
 func tokenFromFile(file string) (*oauth2.Token, error) {
 	f, err := os.Open(file)
 	if err != nil {
@@ -68,9 +61,7 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 	return t, err
 }
 
-// Saves a token to a file path.
 func saveToken(path string, token *oauth2.Token) {
-	fmt.Printf("Saving credential file to: %s\n", path)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		log.Fatalf("Unable to cache oauth token: %v", err)
@@ -79,9 +70,6 @@ func saveToken(path string, token *oauth2.Token) {
 	json.NewEncoder(f).Encode(token)
 }
 
-// --- APP LOGIC ---
-
-// InitDriveService reads credentials.json and sets up the Drive client
 func InitDriveService() error {
 	ctx := context.Background()
 	b, err := os.ReadFile("credentials.json")
@@ -89,7 +77,6 @@ func InitDriveService() error {
 		return fmt.Errorf("unable to read client secret file: %v", err)
 	}
 
-	// If modifying these scopes, delete your previously saved token.json.
 	config, err := google.ConfigFromJSON(b, drive.DriveFileScope)
 	if err != nil {
 		return fmt.Errorf("unable to parse client secret file to config: %v", err)
@@ -100,81 +87,138 @@ func InitDriveService() error {
 	if err != nil {
 		return fmt.Errorf("unable to retrieve Drive client: %v", err)
 	}
+
+	// Setup Folder
+	appFolderID, err = GetOrCreateFolder("MyNotes")
+	if err != nil {
+		return fmt.Errorf("unable to setup app folder: %v", err)
+	}
+
 	return nil
 }
 
-// DriveNote represents a file found in Drive
-type DriveNote struct {
-	ID   string
-	Name string
+func GetOrCreateFolder(folderName string) (string, error) {
+	q := fmt.Sprintf("mimeType='application/vnd.google-apps.folder' and name='%s' and trashed=false", folderName)
+	r, err := srv.Files.List().Q(q).Fields("files(id)").Do()
+	if err != nil {
+		return "", err
+	}
+	if len(r.Files) > 0 {
+		return r.Files[0].Id, nil
+	}
+	f := &drive.File{
+		Name:     folderName,
+		MimeType: "application/vnd.google-apps.folder",
+	}
+	file, err := srv.Files.Create(f).Fields("id").Do()
+	if err != nil {
+		return "", err
+	}
+	return file.Id, nil
 }
 
-// ListNotes finds all files that we have created (identified by a custom property or name)
-func ListNotes() ([]DriveNote, error) {
-	// We search for files not in trash, and make sure they are text files
-	// To keep it simple, we just look for text/plain files.
-	// In production, we would use `appProperties has { key='app' and value='secure_notes' }`
-	q := "mimeType = 'text/plain' and trashed = false"
+// --- NEW LOGIC FOR JSON & PRIVACY ---
 
-	r, err := srv.Files.List().Q(q).Fields("nextPageToken, files(id, name)").Do()
+// GenerateRandomID creates a random string for the filename
+func GenerateRandomID() string {
+	bytes := make([]byte, 8) // 16 characters hex
+	if _, err := rand.Read(bytes); err != nil {
+		return "unknown_id"
+	}
+	return hex.EncodeToString(bytes)
+}
+
+// DriveFile represents the file metadata on Drive
+type DriveFile struct {
+	DriveID string // Google Drive ID (e.g., 1A2B...)
+	Name    string // Filename (e.g., a4f9...json)
+}
+
+// ListDriveFiles returns all the raw files in our folder.
+// Note: It does NOT return the Titles anymore, because Titles are encrypted inside!
+func ListDriveFiles() ([]DriveFile, error) {
+	q := fmt.Sprintf("'%s' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false", appFolderID)
+
+	// We list all files.
+	r, err := srv.Files.List().Q(q).Fields("files(id, name)").Do()
 	if err != nil {
 		return nil, err
 	}
 
-	var notes []DriveNote
+	var files []DriveFile
 	for _, f := range r.Files {
-		// Filter: We only want notes that look like ours (e.g. they don't have extensions usually in our logic, or we just show all text files)
-		notes = append(notes, DriveNote{ID: f.Id, Name: f.Name})
+		files = append(files, DriveFile{DriveID: f.Id, Name: f.Name})
 	}
-	return notes, nil
+	return files, nil
 }
 
-// SaveNote uploads a new file or updates an existing one
-// If id is empty, it creates a new file. If id is present, it updates that file.
-func SaveNote(id, title, content string) (string, error) {
-	fileMetadata := &drive.File{
-		Name:     title,
-		MimeType: "text/plain",
+// SaveJSONNote encrypts and uploads the JSON struct
+func SaveJSONNote(driveID string, data NoteData, password string) (string, error) {
+	// 1. Marshal struct to JSON
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return "", err
 	}
 
-	// Create a reader from the string content
-	contentReader := strings.NewReader(content)
+	// 2. Encrypt the JSON string
+	encryptedJSON, err := Encrypt(password, string(jsonBytes))
+	if err != nil {
+		return "", err
+	}
 
-	if id == "" {
-		// --- CREATE NEW ---
-		// FIX: Use .Media() to attach content, instead of passing it as an argument
+	// 3. Prepare Content
+	contentReader := strings.NewReader(encryptedJSON)
+
+	// 4. Determine Filename (Use the ID from the struct)
+	filename := data.ID + ".json"
+
+	fileMetadata := &drive.File{
+		Name: filename,
+	}
+
+	if driveID == "" {
+		// CREATE NEW
+		fileMetadata.Parents = []string{appFolderID}
 		f, err := srv.Files.Create(fileMetadata).Media(contentReader).Fields("id").Do()
 		if err != nil {
 			return "", err
 		}
 		return f.Id, nil
 	} else {
-		// --- UPDATE EXISTING ---
-		// FIX: Use .Media() to attach content here as well
-		_, err := srv.Files.Update(id, fileMetadata).Media(contentReader).Do()
+		// UPDATE EXISTING (We only update content, filename usually stays same)
+		_, err := srv.Files.Update(driveID, fileMetadata).Media(contentReader).Do()
 		if err != nil {
 			return "", err
 		}
-		return id, nil
+		return driveID, nil
 	}
 }
 
-// DownloadNoteContent gets the text body of a file
-func DownloadNoteContent(fileId string) (string, error) {
-	// 1. Request the file content from Drive
-	resp, err := srv.Files.Get(fileId).Download()
+// FetchAndDecryptNote downloads a file, decrypts it, and unmarshals it into NoteData
+func FetchAndDecryptNote(driveID string, password string) (*NoteData, error) {
+	// 1. Download Content
+	resp, err := srv.Files.Get(driveID).Download()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	// Ensure the connection closes when we are done
 	defer resp.Body.Close()
 
-	// 2. Read all bytes from the response body
-	contentBytes, err := io.ReadAll(resp.Body)
+	encryptedBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	// 3. Convert bytes to string and return
-	return string(contentBytes), nil
+	// 2. Decrypt
+	jsonStr, err := Decrypt(password, string(encryptedBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Unmarshal
+	var note NoteData
+	if err := json.Unmarshal([]byte(jsonStr), &note); err != nil {
+		return nil, err
+	}
+
+	return &note, nil
 }
