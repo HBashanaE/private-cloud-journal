@@ -178,7 +178,12 @@ func showMainApp(w fyne.Window) {
 			if title == "" {
 				title = "Untitled Note"
 			}
-			o.(*fyne.Container).Objects[0].(*widget.Label).SetText(title)
+
+			// Update status safely
+			fyne.Do(func() {
+				o.(*fyne.Container).Objects[0].(*widget.Label).SetText(title)
+			})
+
 		},
 	)
 
@@ -292,7 +297,10 @@ func refreshNotes(ui *UIComponents) {
 		// In a real app, we would parallelize this or use a local DB cache.
 		var newCache []drive.AppNote
 
-		ui.StatusLabel.SetText("Syncing: Decrypting notes...")
+		// Update status safely
+		fyne.Do(func() {
+			ui.StatusLabel.SetText("Syncing: Decrypting notes...")
+		})
 
 		for _, f := range files {
 			// Skip if not json
@@ -314,8 +322,14 @@ func refreshNotes(ui *UIComponents) {
 
 		// 3. Update UI
 		noteCache = newCache
-		ui.NoteList.Refresh()
-		ui.StatusLabel.SetText("Sync Complete.")
+		fyne.Do(func() {
+			ui.NoteList.Refresh()
+		})
+
+		// Update status safely
+		fyne.Do(func() {
+			ui.StatusLabel.SetText("Sync Complete.")
+		})
 	}()
 }
 
