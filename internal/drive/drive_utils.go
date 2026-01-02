@@ -1,4 +1,4 @@
-package main
+package drive
 
 import (
 	"context"
@@ -11,15 +11,33 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
+
+	"private-cloud-journal/internal/crypto"
 )
 
 var srv *drive.Service
 var appFolderID string
+
+// NoteData is the structure we save inside the encrypted JSON
+type NoteData struct {
+	ID        string    `json:"id"` // Internal App ID (random string)
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// AppNote holds the data + the Google Drive File ID needed for updates
+type AppNote struct {
+	DriveID string
+	Data    NoteData
+}
 
 // --- AUTH & SETUP (Same as before) ---
 
@@ -161,7 +179,7 @@ func SaveJSONNote(driveID string, data NoteData, password string) (string, error
 	}
 
 	// 2. Encrypt the JSON string
-	encryptedJSON, err := Encrypt(password, string(jsonBytes))
+	encryptedJSON, err := crypto.Encrypt(password, string(jsonBytes))
 	if err != nil {
 		return "", err
 	}
@@ -209,7 +227,7 @@ func FetchAndDecryptNote(driveID string, password string) (*NoteData, error) {
 	}
 
 	// 2. Decrypt
-	jsonStr, err := Decrypt(password, string(encryptedBytes))
+	jsonStr, err := crypto.Decrypt(password, string(encryptedBytes))
 	if err != nil {
 		return nil, err
 	}

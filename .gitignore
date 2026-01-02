@@ -1,3 +1,12 @@
-app_config.json
+# Binaries
+/build/
+*.exe
+*.app
+
+# Sensitive Credentials
 credentials.json
 token.json
+app_config.json
+
+# Mac OS junk
+.DS_Store

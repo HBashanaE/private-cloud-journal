@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"image/color"
@@ -7,29 +7,16 @@ import (
 	"time"
 
 	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"private-cloud-journal/internal/auth"
+	"private-cloud-journal/internal/drive"
 )
-
-// NoteData is the structure we save inside the encrypted JSON
-type NoteData struct {
-	ID        string    `json:"id"` // Internal App ID (random string)
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-}
-
-// AppNote holds the data + the Google Drive File ID needed for updates
-type AppNote struct {
-	DriveID string
-	Data    NoteData
-}
 
 type UIComponents struct {
 	NoteList    *widget.List
@@ -43,26 +30,12 @@ type UIComponents struct {
 
 // Global state
 var sessionPassword string
-var currentDriveID string // The Google Drive ID of the currently selected note
-var currentAppID string   // The Internal App ID (filename)
-var noteCache []AppNote   // Stores the fully decrypted notes for the list
-
-func main() {
-	myApp := app.New()
-	myWindow := myApp.NewWindow("Secure Drive Notes (JSON Privacy)")
-	myWindow.Resize(fyne.NewSize(950, 650))
-
-	if IsFirstRun() {
-		showRegistrationScreen(myWindow)
-	} else {
-		showLoginScreen(myWindow)
-	}
-
-	myWindow.ShowAndRun()
-}
+var currentDriveID string     // The Google Drive ID of the currently selected note
+var currentAppID string       // The Internal App ID (filename)
+var noteCache []drive.AppNote // Stores the fully decrypted notes for the list
 
 // --- Screen 1: Registration (First Run) ---
-func showRegistrationScreen(w fyne.Window) {
+func ShowRegistrationScreen(w fyne.Window) {
 	passEntry := widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("Create Master Password")
 
@@ -82,7 +55,7 @@ func showRegistrationScreen(w fyne.Window) {
 			errorLabel.SetText("Passwords do not match")
 			return
 		}
-		if err := SavePasswordHash(passEntry.Text); err != nil {
+		if err := auth.SavePasswordHash(passEntry.Text); err != nil {
 			errorLabel.SetText("Error saving config: " + err.Error())
 			return
 		}
@@ -131,7 +104,7 @@ func showRegistrationScreen(w fyne.Window) {
 }
 
 // --- Screen 2: Login (Subsequent Runs) ---
-func showLoginScreen(w fyne.Window) {
+func ShowLoginScreen(w fyne.Window) {
 	passEntry := widget.NewPasswordEntry()
 	passEntry.SetPlaceHolder("Enter Master Password")
 
@@ -140,7 +113,7 @@ func showLoginScreen(w fyne.Window) {
 	errorLabel.TextStyle = fyne.TextStyle{Italic: true}
 
 	loginBtn := widget.NewButton("Unlock Safe", func() {
-		if VerifyPassword(passEntry.Text) {
+		if auth.VerifyPassword(passEntry.Text) {
 			sessionPassword = passEntry.Text
 			initDriveAndShowApp(w)
 		} else {
@@ -184,24 +157,6 @@ func showLoginScreen(w fyne.Window) {
 	card := widget.NewCard("", "", container.NewPadded(formContent))
 
 	w.SetContent(container.NewCenter(card))
-}
-
-// Helper to init drive inside the GUI flow
-func initDriveAndShowApp(w fyne.Window) {
-	// Show a loading screen while we connect to Google
-	w.SetContent(container.NewCenter(widget.NewLabel("Connecting to Google Drive...\nCheck your terminal if it's the first time!")))
-
-	// Do this in a goroutine so UI doesn't freeze, but for the AUTH step specifically,
-	// we need to wait because we can't show the app without the service.
-	// Since the auth might require terminal interaction, we run it directly here.
-
-	err := InitDriveService()
-	if err != nil {
-		dialog.ShowError(err, w)
-		return
-	}
-
-	showMainApp(w)
 }
 
 // --- Screen 3: Main App ---
@@ -281,11 +236,11 @@ func showMainApp(w fyne.Window) {
 
 		// Generate ID if new
 		if currentAppID == "" {
-			currentAppID = GenerateRandomID()
+			currentAppID = drive.GenerateRandomID()
 		}
 
 		// Create Struct
-		note := NoteData{
+		note := drive.NoteData{
 			ID:        currentAppID,
 			Title:     title,
 			Body:      body,
@@ -297,7 +252,7 @@ func showMainApp(w fyne.Window) {
 
 		// Save (Encrypts the whole struct)
 		go func() {
-			driveID, err := SaveJSONNote(currentDriveID, note, sessionPassword)
+			driveID, err := drive.SaveJSONNote(currentDriveID, note, sessionPassword)
 			if err != nil {
 				ui.StatusLabel.SetText("Save failed: " + err.Error())
 				return
@@ -327,7 +282,7 @@ func refreshNotes(ui *UIComponents) {
 
 	go func() {
 		// 1. List Files (Only gets IDs and Encrypted filenames)
-		files, err := ListDriveFiles()
+		files, err := drive.ListDriveFiles()
 		if err != nil {
 			log.Println("List error:", err)
 			return
@@ -335,7 +290,7 @@ func refreshNotes(ui *UIComponents) {
 
 		// 2. Download & Decrypt each file to build the cache
 		// In a real app, we would parallelize this or use a local DB cache.
-		var newCache []AppNote
+		var newCache []drive.AppNote
 
 		ui.StatusLabel.SetText("Syncing: Decrypting notes...")
 
@@ -345,13 +300,13 @@ func refreshNotes(ui *UIComponents) {
 				continue
 			}
 
-			noteData, err := FetchAndDecryptNote(f.DriveID, sessionPassword)
+			noteData, err := drive.FetchAndDecryptNote(f.DriveID, sessionPassword)
 			if err != nil {
 				log.Println("Failed to decrypt file:", f.Name, err)
 				continue
 			}
 
-			newCache = append(newCache, AppNote{
+			newCache = append(newCache, drive.AppNote{
 				DriveID: f.DriveID,
 				Data:    *noteData,
 			})
@@ -362,4 +317,22 @@ func refreshNotes(ui *UIComponents) {
 		ui.NoteList.Refresh()
 		ui.StatusLabel.SetText("Sync Complete.")
 	}()
+}
+
+// Helper to init drive inside the GUI flow
+func initDriveAndShowApp(w fyne.Window) {
+	// Show a loading screen while we connect to Google
+	w.SetContent(container.NewCenter(widget.NewLabel("Connecting to Google Drive...\nCheck your terminal if it's the first time!")))
+
+	// Do this in a goroutine so UI doesn't freeze, but for the AUTH step specifically,
+	// we need to wait because we can't show the app without the service.
+	// Since the auth might require terminal interaction, we run it directly here.
+
+	err := drive.InitDriveService()
+	if err != nil {
+		dialog.ShowError(err, w)
+		return
+	}
+
+	showMainApp(w)
 }
