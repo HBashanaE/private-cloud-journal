@@ -283,7 +283,9 @@ func showMainApp(w fyne.Window) {
 }
 
 func refreshNotes(ui *UIComponents) {
-	ui.StatusLabel.SetText("Syncing: Fetching file list...")
+	fyne.Do(func() {
+		ui.StatusLabel.SetText("Syncing: Fetching file list...")
+	})
 
 	go func() {
 		// 1. List Files (Only gets IDs and Encrypted filenames)

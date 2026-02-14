@@ -10,7 +10,7 @@ import (
 
 func main() {
 	myApp := app.New()
-	myWindow := myApp.NewWindow("Secure Drive Notes (JSON Privacy)")
+	myWindow := myApp.NewWindow("Private Cloud Journal")
 	myWindow.Resize(fyne.NewSize(950, 650))
 
 	if auth.IsFirstRun() {
